@@ -1,0 +1,75 @@
+ARC-AGI攻略用アーキテクチャ：PSTT (Power-Set Tokenizer Transformer) 実装仕様書
+
+1. 開発目的
+
+Gemma 3（マルチモーダル・デコーダー・トランスフォーマー）の視覚推論能力、特にARC-AGIにおける「オブジェクト間の論理的関係」と「空間認識」の精度を飛躍的に向上させる。既存の「パッチ（タイル）単位の処理」を、PSTTによって「オブジェクト（集合）単位の論理処理」へと進化させる。
+
+2. ベースモデル（Gemma 3）の構造理解
+
+Vision Encoder: SigLIP (400M variant) を使用。
+
+Pan & Scan (P&S): 高解像度画像を $896 \times 896$ の複数のクロップに分割処理。
+
+例：$1792 \times 896$ 入力の場合、2つのクロップから計512個（256 × 2）の視覚トークンが生成される。
+
+Decoder Backbone: 5層の Local Attention と 1層の Global Attention を交互に配置する「5:1 Interleaving」構造。
+
+課題: P&Sによる境界線の断絶、およびGlobal層における論理的なオブジェクト結合能力の不足。
+
+3. 提案アーキテクチャ：PSTT (Vision-Bridge)
+
+SigLIPとGemmaデコーダーの間に挿入する、微分可能なオブジェクト抽出・論理強化モジュール。
+
+Step 1: Pair-wise Scanning (Selection Phase)
+
+512個の視覚トークン $X \in \mathbb{R}^{512 \times D}$ 間でアテンションを計算。
+
+Objectness Score ($S$): $S_i = \text{MLP}(x_i) \cdot \sum_{j} \text{Softmax}(\frac{Q_i K_j^T}{\sqrt{d}})$ を算出。
+
+Differentiable Top-K Selection: 上位10個のシードトークンを物理的に抽出。微分可能性を担保するため、Straight-Through Estimator (STE) を採用。
+
+$$X_{top10} = X_{selected} + (S_{selected} - S_{selected}.\text{detach}())$$
+
+Step 2: Power-Set Generation (Construction Phase)
+
+選ばれた10個のシードトークンに対し、べき集合 $\mathcal{P}(X_{top10})$ から空集合を除いた $2^{10}-1 = 1023$ 通りの組み合わせを生成。
+
+Attention Pooling: 各グループ $k$ に含まれる $m$ 個のトークンに対し、固定次元 $D$ への集約を行う。
+
+$$g_k = \text{LayerNorm}\left( \sum_{i=1}^m \alpha_i v_i \right), \quad \alpha = \text{Softmax}(\text{MLP}(X_{\text{group\_k}}))$$
+
+※単純な平均ではなく、視覚情報 $V$ を活用した重み付き和。
+
+Step 3: Logical Scoring & Gated Filtering
+
+1023個のグループトークン $G$ に対し、独自のSelf-Attentionを適用。
+
+「グループとしての論理的完結度」が高い上位20個のグループトークン $G_{refined}$ を抽出（ここでもSoft-Thresholding/STEを使用）。
+
+Step 4: Gated Cross-Refinement (Emphasis Phase)
+
+抽出された20個の論理情報を、元の512個のパッチへ逆注入する。
+
+Cross-Attention: Queryを元の $X$（512個）、Key/Valueを $G_{refined}$（20個）として実行。
+
+Result: 各パッチは「自分がどの論理的グループに属するか」という文脈を含んだ $X_{refined}$ へと更新される。
+
+Output: 最終的に $X_{final} = X + \text{MLP}(X_{refined}) \times \text{Gate}$ をGemmaデコーダーの入力とする。
+
+4. 実装上の技術的ポイント
+
+微分可能性の維持: topk 操作における勾配消失を避けるため、PyTorchの .detach() を用いたSTEトリックを実装すること。
+
+空間情報の保持: グループ化の際、パッチ間の相対距離 $(\Delta x, \Delta y)$ や幾何学的特徴をベクトルに明示的に連結（Concat）することを検討。
+
+計算効率: べき集合の生成（1023通り）は行列演算で並列化し、メモリ爆発を抑える。
+
+学習戦略: SigLIPおよびGemma本体はフリーズ（requires_grad=False）し、PSTTの重みのみを学習させる「アダプター・チューニング」を基本とする。
+
+5. Claudeへのリクエスト事項
+
+上記フローに基づき、特に Step 1 の STE を用いた Top-K 抽出 と、Step 2 の Attention Pooling の PyTorch 実装コードのプロトタイプを作成してください。
+
+$1792 \times 896$ 入力時の 512 トークンを想定した Tensor Shape の推移を明示してください。
+
+Gemma 3 の既存の Projector 層をバイパス、または置き換えて PSTT を接続するためのインターフェース設計を提案してください。

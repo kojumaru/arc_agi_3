@@ -82,9 +82,10 @@ except Exception:
 # ──────────────────────────────────────────────────────────────────────
 
 
-def frame_to_image(frame, cell=10):
+def frame_to_image(frame, siglip_size=896):
     h, w = len(frame), len(frame[0])
-    img  = Image.new("RGB", (w * cell, h * cell))
+    cell  = max(1, siglip_size // max(h, w))
+    img   = Image.new("RGB", (w * cell, h * cell))
     pixels = img.load()
     for r in range(h):
         for c in range(w):
@@ -93,6 +94,8 @@ def frame_to_image(frame, cell=10):
             for dr in range(cell):
                 for dc in range(cell):
                     pixels[c * cell + dc, r * cell + dr] = rgb
+    if img.size != (siglip_size, siglip_size):
+        img = img.resize((siglip_size, siglip_size), Image.NEAREST)
     return img
 
 
